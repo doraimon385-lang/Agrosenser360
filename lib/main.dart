@@ -24,10 +24,10 @@ const hallazgos = <String, String>{
   'Otro': 'otro',
 };
 
-class _Hip {
+class Hip {
   final String titulo, evidencia, apoya;
   final List<String> comprobar;
-  const _Hip(this.titulo, this.evidencia, this.apoya, this.comprobar);
+  const Hip(this.titulo, this.evidencia, this.apoya, this.comprobar);
 }
 
 void main() => runApp(const AgroSenserApp());
@@ -73,7 +73,6 @@ class _FincaScreenState extends State<FincaScreen> {
     _cargarInsp();
   }
 
-  // ---------- Almacenamiento local ----------
   Future<void> _cargarInsp() async {
     final sp = await SharedPreferences.getInstance();
     final s = sp.getString('inspecciones');
@@ -93,7 +92,6 @@ class _FincaScreenState extends State<FincaScreen> {
     await sp.setString('inspecciones', jsonEncode(_insp));
   }
 
-  // ---------- Geometría ----------
   double get _areaM2 {
     if (_puntos.length < 3) return 0;
     final o = _puntos[0];
@@ -209,7 +207,6 @@ class _FincaScreenState extends State<FincaScreen> {
     return 'Inspeccionadas $ins de ${_zonas.length} · con problema $p · sin cultivo $s · normales $n';
   }
 
-  // ---------- Análisis ----------
   Future<void> _analizar() async {
     setState(() {
       _cargando = true;
@@ -270,7 +267,6 @@ class _FincaScreenState extends State<FincaScreen> {
         _error = null;
       });
 
-  // ---------- Lista de zonas ----------
   void _verZonas() {
     final zonas = List.of(_zonas);
     zonas.sort((a, b) {
@@ -313,12 +309,11 @@ class _FincaScreenState extends State<FincaScreen> {
     );
   }
 
-  // ---------- Ficha de la zona ----------
-  List<_Hip> _hipotesis(double dBorde) {
+  List<Hip> _hipotesis(double dBorde) {
     final cerca = dBorde < 40;
     final dTxt = dBorde.isFinite ? '${dBorde.round()} m' : 'distancia desconocida';
     return [
-      _Hip(
+      Hip(
         'Posible superficie sin cultivo',
         cerca ? 'media' : 'baja',
         'La zona está a $dTxt del borde de la finca.',
@@ -327,7 +322,7 @@ class _FincaScreenState extends State<FincaScreen> {
           'Recorre la zona y mira si hay construcciones, caminos o suelo sin sembrar',
         ],
       ),
-      const _Hip(
+      const Hip(
         'Posible exceso o falta de agua en el suelo',
         'baja',
         'Aún no hay dato de humedad (NDMI) para esta zona.',
@@ -337,7 +332,7 @@ class _FincaScreenState extends State<FincaScreen> {
           'Revisa el drenaje y la pendiente',
         ],
       ),
-      const _Hip(
+      const Hip(
         'Posible limitación del suelo o de nutrientes',
         'baja',
         'Solo hay un dato de vigor, sin análisis de suelo.',
@@ -347,7 +342,7 @@ class _FincaScreenState extends State<FincaScreen> {
           'Envíalas a un laboratorio y compara los resultados',
         ],
       ),
-      const _Hip(
+      const Hip(
         'Posible daño en las plantas (plaga, enfermedad u otro)',
         'baja',
         'No hay evidencia directa, solo el vigor bajo.',
@@ -360,7 +355,7 @@ class _FincaScreenState extends State<FincaScreen> {
     ];
   }
 
-  Widget _tarjetaHip(_Hip h) => Container(
+  Widget _tarjetaHip(Hip h) => Container(
         width: double.infinity,
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(12),
@@ -505,7 +500,6 @@ class _FincaScreenState extends State<FincaScreen> {
     );
   }
 
-  // ---------- Panel inferior ----------
   Widget _dato(Color c, String titulo, Object? valor) => Expanded(
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 3),
@@ -572,7 +566,80 @@ class _FincaScreenState extends State<FincaScreen> {
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
       ),
       if (_error != null)
-        Padd             if (_puntos.length >= 3)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(_error!, style: const TextStyle(color: Colors.red)),
+        ),
+      const SizedBox(height: 8),
+      Row(children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: _puntos.isEmpty || _cargando
+                ? null
+                : () => setState(() => _puntos.removeLast()),
+            icon: const Icon(Icons.undo),
+            label: const Text('Deshacer'),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: _puntos.isEmpty || _cargando
+                ? null
+                : () => setState(() => _puntos.clear()),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Borrar'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 8),
+      SizedBox(
+        width: double.infinity,
+        child: FilledButton.icon(
+          onPressed: _puntos.length < 3 || _cargando ? null : _analizar,
+          icon: const Icon(Icons.eco),
+          label: const Text('Analizar NDVI'),
+        ),
+      ),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final conResultado = _res != null;
+    return Scaffold(
+      appBar: AppBar(title: const Text('AgroSenser360')),
+      body: Column(
+        children: [
+          Expanded(
+            child: Stack(
+              children: [
+                FlutterMap(
+                  mapController: _mapa,
+                  options: MapOptions(
+                    initialCenter: const LatLng(19.2314, -70.2210),
+                    initialZoom: 16,
+                    maxZoom: 19,
+                    onTap: (_, p) {
+                      if (_cargando) return;
+                      if (conResultado) {
+                        final z = _zonaEn(p);
+                        if (z != null) _detalleZona(z);
+                      } else {
+                        setState(() => _puntos.add(p));
+                      }
+                    },
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate:
+                          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                      userAgentPackageName: 'com.agrosenser.agrosenser360',
+                      maxNativeZoom: 19,
+                    ),
+                    if (conResultado && _verNdvi && _overlay != null)
+                      OverlayImageLayer(overlayImages: [_overlay!]),
+                    if (_puntos.length >= 3)
                       PolygonLayer(polygons: [
                         Polygon(
                           points: List.of(_puntos),
@@ -595,11 +662,31 @@ class _FincaScreenState extends State<FincaScreen> {
                                   i++)
                                 _anillo(f['geometry']['coordinates'][i] as List)
                             ],
-                            color: _color(f).withOpacity(0.35),
+                            color: (_inspeccionada(f) ? Colors.blue : _color(f))
+                                .withOpacity(0.35),
                             isFilled: true,
-                            borderColor: _color(f),
+                            borderColor: _inspeccionada(f) ? Colors.blue : _color(f),
                             borderStrokeWidth: 2,
                           ),
+                      ]),
+                    if (conResultado)
+                      MarkerLayer(markers: [
+                        for (final f in _zonas)
+                          if (_inspeccionada(f))
+                            Marker(
+                              point: _centro(f),
+                              width: 22,
+                              height: 22,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.blue, width: 2),
+                                ),
+                                child: const Icon(Icons.check,
+                                    size: 14, color: Colors.blue),
+                              ),
+                            ),
                       ]),
                     if (!conResultado)
                       MarkerLayer(markers: [
@@ -662,6 +749,152 @@ class _FincaScreenState extends State<FincaScreen> {
             child: Padding(padding: const EdgeInsets.all(12), child: _panel()),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class FormInspeccion extends StatefulWidget {
+  final Future<void> Function(Map<String, dynamic>) onGuardar;
+  const FormInspeccion({super.key, required this.onGuardar});
+
+  @override
+  State<FormInspeccion> createState() => _FormInspeccionState();
+}
+
+class _FormInspeccionState extends State<FormInspeccion> {
+  String? _hallazgo;
+  String? _foto;
+  bool _muestra = false;
+  String? _error;
+  bool _guardando = false;
+  final _obs = TextEditingController();
+  final _codigo = TextEditingController();
+
+  @override
+  void dispose() {
+    _obs.dispose();
+    _codigo.dispose();
+    super.dispose();
+  }
+
+  Future<void> _tomarFoto() async {
+    try {
+      final x = await ImagePicker().pickImage(
+          source: ImageSource.camera, imageQuality: 80, maxWidth: 1600);
+      if (x == null) return;
+      final dir = await getApplicationDocumentsDirectory();
+      final destino =
+          '${dir.path}/insp_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await File(x.path).copy(destino);
+      setState(() => _foto = destino);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('No se pudo abrir la cámara. Revisa los permisos.')));
+    }
+  }
+
+  Future<void> _guardar() async {
+    if (_hallazgo == null) {
+      setState(() => _error = 'Elige qué encontraste');
+      return;
+    }
+    setState(() => _guardando = true);
+    await widget.onGuardar({
+      'fecha': DateTime.now().toIso8601String(),
+      'hallazgo': _hallazgo,
+      'grupo': hallazgos[_hallazgo],
+      'observaciones': _obs.text.trim(),
+      'muestra': _muestra,
+      'codigo_muestra': _codigo.text.trim(),
+      'foto': _foto,
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          16, 0, 16, MediaQuery.of(context).viewInsets.bottom + 16),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Registrar inspección',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 12),
+            const Text('¿Qué encontraste?',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                for (final h in hallazgos.keys)
+                  ChoiceChip(
+                    label: Text(h),
+                    selected: _hallazgo == h,
+                    onSelected: (_) => setState(() {
+                      _hallazgo = h;
+                      _error = null;
+                    }),
+                  ),
+              ],
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _tomarFoto,
+              icon: const Icon(Icons.photo_camera),
+              label: Text(_foto == null ? 'Tomar fotografía' : 'Cambiar fotografía'),
+            ),
+            if (_foto != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.file(File(_foto!),
+                      height: 140, width: double.infinity, fit: BoxFit.cover),
+                ),
+              ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _obs,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                labelText: 'Observaciones',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Tomé una muestra de suelo'),
+              value: _muestra,
+              onChanged: (v) => setState(() => _muestra = v),
+            ),
+            if (_muestra)
+              TextField(
+                controller: _codigo,
+                decoration: const InputDecoration(
+                  labelText: 'Código de la muestra (opcional)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: _guardando ? null : _guardar,
+                child: const Text('Guardar inspección'),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
