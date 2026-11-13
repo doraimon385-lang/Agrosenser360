@@ -1,7 +1,7 @@
 name: agrosenser360
 description: Monitoreo de cultivos con Sentinel-2 y NDVI
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
+  http: ^1.2.0
 
 flutter:
   uses-material-design: true
