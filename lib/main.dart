@@ -1,13 +1,34 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const apiUrl = 'https://agrosenser360.onrender.com';
+
+const hallazgos = <String, String>{
+  'Sin cultivo (construcción, patio o camino)': 'sin_cultivo',
+  'Suelo descubierto o compactado': 'problema',
+  'Exceso de humedad o encharcamiento': 'problema',
+  'Falta de humedad': 'problema',
+  'Daño visible en las plantas': 'problema',
+  'Maleza': 'problema',
+  'Cultivo con aspecto normal': 'normal',
+  'Otro': 'otro',
+};
+
+class _Hip {
+  final String titulo, evidencia, apoya;
+  final List<String> comprobar;
+  const _Hip(this.titulo, this.evidencia, this.apoya, this.comprobar);
+}
 
 void main() => runApp(const AgroSenserApp());
 
@@ -44,12 +65,40 @@ class _FincaScreenState extends State<FincaScreen> {
   Map<String, dynamic>? _res;
   OverlayImage? _overlay;
   bool _verNdvi = true;
+  Map<String, List<Map<String, dynamic>>> _insp = {};
 
+  @override
+  void initState() {
+    super.initState();
+    _cargarInsp();
+  }
+
+  // ---------- Almacenamiento local ----------
+  Future<void> _cargarInsp() async {
+    final sp = await SharedPreferences.getInstance();
+    final s = sp.getString('inspecciones');
+    if (s == null) return;
+    final m = jsonDecode(s) as Map<String, dynamic>;
+    setState(() {
+      _insp = m.map((k, v) => MapEntry(
+          k,
+          (v as List)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList()));
+    });
+  }
+
+  Future<void> _guardarInsp() async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString('inspecciones', jsonEncode(_insp));
+  }
+
+  // ---------- Geometría ----------
   double get _areaM2 {
     if (_puntos.length < 3) return 0;
     final o = _puntos[0];
     final kx = 111320 * math.cos(o.latitude * math.pi / 180);
-    const ky = 110574;
+    const ky = 110574.0;
     double s = 0;
     for (var i = 0; i < _puntos.length; i++) {
       final a = _puntos[i];
@@ -58,6 +107,48 @@ class _FincaScreenState extends State<FincaScreen> {
           (b.longitude - o.longitude) * kx * (a.latitude - o.latitude) * ky;
     }
     return s.abs() / 2;
+  }
+
+  double _distBordeM(LatLng p) {
+    if (_puntos.length < 2) return double.infinity;
+    final kx = 111320 * math.cos(p.latitude * math.pi / 180);
+    const ky = 110574.0;
+    double mejor = double.infinity;
+    for (var i = 0; i < _puntos.length; i++) {
+      final a = _puntos[i];
+      final b = _puntos[(i + 1) % _puntos.length];
+      final ax = (a.longitude - p.longitude) * kx;
+      final ay = (a.latitude - p.latitude) * ky;
+      final bx = (b.longitude - p.longitude) * kx;
+      final by = (b.latitude - p.latitude) * ky;
+      final dx = bx - ax;
+      final dy = by - ay;
+      final l2 = dx * dx + dy * dy;
+      var t = l2 == 0 ? 0.0 : ((-ax) * dx + (-ay) * dy) / l2;
+      t = t.clamp(0.0, 1.0).toDouble();
+      final px = ax + t * dx;
+      final py = ay + t * dy;
+      final d = math.sqrt(px * px + py * py);
+      if (d < mejor) mejor = d;
+    }
+    return mejor;
+  }
+
+  bool _dentro(LatLng p, List<LatLng> r) {
+    var d = false;
+    for (var i = 0, j = r.length - 1; i < r.length; j = i++) {
+      final a = r[i];
+      final b = r[j];
+      if ((a.latitude > p.latitude) != (b.latitude > p.latitude) &&
+          p.longitude <
+              (b.longitude - a.longitude) *
+                      (p.latitude - a.latitude) /
+                      (b.latitude - a.latitude) +
+                  a.longitude) {
+        d = !d;
+      }
+    }
+    return d;
   }
 
   List<LatLng> _anillo(List r) => [
@@ -71,6 +162,54 @@ class _FincaScreenState extends State<FincaScreen> {
   Color _color(dynamic f) =>
       (f['properties']['level'] as num) == 2 ? Colors.red : Colors.orange;
 
+  LatLng _centro(dynamic f) {
+    final c = f['properties']['center'];
+    return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
+  }
+
+  String _claveZona(dynamic f) {
+    final c = _centro(f);
+    return '${c.latitude.toStringAsFixed(4)},${c.longitude.toStringAsFixed(4)}';
+  }
+
+  bool _inspeccionada(dynamic f) => (_insp[_claveZona(f)] ?? []).isNotEmpty;
+
+  dynamic _zonaEn(LatLng p) {
+    for (final f in _zonas) {
+      final ring = _anillo(f['geometry']['coordinates'][0] as List);
+      if (_dentro(p, ring)) return f;
+    }
+    dynamic mejor;
+    double md = 30;
+    for (final f in _zonas) {
+      final d = const Distance().as(LengthUnit.Meter, p, _centro(f));
+      if (d < md) {
+        md = d;
+        mejor = f;
+      }
+    }
+    return mejor;
+  }
+
+  String _resumen() {
+    int ins = 0, p = 0, s = 0, n = 0;
+    for (final f in _zonas) {
+      final l = _insp[_claveZona(f)];
+      if (l == null || l.isEmpty) continue;
+      ins++;
+      final g = l.last['grupo'];
+      if (g == 'problema') {
+        p++;
+      } else if (g == 'sin_cultivo') {
+        s++;
+      } else if (g == 'normal') {
+        n++;
+      }
+    }
+    return 'Inspeccionadas $ins de ${_zonas.length} · con problema $p · sin cultivo $s · normales $n';
+  }
+
+  // ---------- Análisis ----------
   Future<void> _analizar() async {
     setState(() {
       _cargando = true;
@@ -131,11 +270,19 @@ class _FincaScreenState extends State<FincaScreen> {
         _error = null;
       });
 
+  // ---------- Lista de zonas ----------
   void _verZonas() {
-    final zonas = _zonas;
+    final zonas = List.of(_zonas);
+    zonas.sort((a, b) {
+      final ia = _inspeccionada(a) ? 1 : 0;
+      final ib = _inspeccionada(b) ? 1 : 0;
+      if (ia != ib) return ia - ib;
+      return (b['properties']['level'] as num)
+          .compareTo(a['properties']['level'] as num);
+    });
     showModalBottomSheet(
       context: context,
-      builder: (_) => SafeArea(
+      builder: (ctx) => SafeArea(
         child: zonas.isEmpty
             ? const Padding(
                 padding: EdgeInsets.all(24),
@@ -146,18 +293,18 @@ class _FincaScreenState extends State<FincaScreen> {
                 children: [
                   for (final f in zonas)
                     ListTile(
-                      leading: Icon(Icons.warning_amber, color: _color(f)),
+                      leading: _inspeccionada(f)
+                          ? const Icon(Icons.check_circle, color: Colors.blue)
+                          : Icon(Icons.warning_amber, color: _color(f)),
                       title: Text(
                           '${f['properties']['priority']} · ${f['properties']['area_ha']} ha'),
-                      subtitle: Text(
-                          '${(f['properties']['center'][1] as num).toStringAsFixed(5)}, ${(f['properties']['center'][0] as num).toStringAsFixed(5)}'),
+                      subtitle: Text(_inspeccionada(f)
+                          ? 'Inspeccionada: ${_insp[_claveZona(f)]!.last['hallazgo']}'
+                          : 'Pendiente de inspección'),
                       onTap: () {
-                        Navigator.pop(context);
-                        _mapa.move(
-                          LatLng((f['properties']['center'][1] as num).toDouble(),
-                              (f['properties']['center'][0] as num).toDouble()),
-                          18,
-                        );
+                        Navigator.pop(ctx);
+                        _mapa.move(_centro(f), 18);
+                        _detalleZona(f);
                       },
                     ),
                 ],
@@ -166,6 +313,199 @@ class _FincaScreenState extends State<FincaScreen> {
     );
   }
 
+  // ---------- Ficha de la zona ----------
+  List<_Hip> _hipotesis(double dBorde) {
+    final cerca = dBorde < 40;
+    final dTxt = dBorde.isFinite ? '${dBorde.round()} m' : 'distancia desconocida';
+    return [
+      _Hip(
+        'Posible superficie sin cultivo',
+        cerca ? 'media' : 'baja',
+        'La zona está a $dTxt del borde de la finca.',
+        const [
+          'Compara con la imagen satelital de alta resolución',
+          'Recorre la zona y mira si hay construcciones, caminos o suelo sin sembrar',
+        ],
+      ),
+      const _Hip(
+        'Posible exceso o falta de agua en el suelo',
+        'baja',
+        'Aún no hay dato de humedad (NDMI) para esta zona.',
+        [
+          'Mira si hay charcos, suelo agrietado o plantas marchitas',
+          'Mide la humedad a unos 20 cm y compárala con una zona sana',
+          'Revisa el drenaje y la pendiente',
+        ],
+      ),
+      const _Hip(
+        'Posible limitación del suelo o de nutrientes',
+        'baja',
+        'Solo hay un dato de vigor, sin análisis de suelo.',
+        [
+          'Revisa la compactación: ¿cuesta clavar una varilla?',
+          'Toma una muestra en la zona y otra en una zona sana, a la misma profundidad y el mismo día',
+          'Envíalas a un laboratorio y compara los resultados',
+        ],
+      ),
+      const _Hip(
+        'Posible daño en las plantas (plaga, enfermedad u otro)',
+        'baja',
+        'No hay evidencia directa, solo el vigor bajo.',
+        [
+          'Examina hojas, tallos y raíces de varias plantas',
+          'Mira si el daño empieza en un punto y se extiende',
+          'Fotografía lo que encuentres',
+        ],
+      ),
+    ];
+  }
+
+  Widget _tarjetaHip(_Hip h) => Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.black26),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Expanded(
+                child: Text(h.titulo,
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('Evidencia ${h.evidencia}',
+                    style: const TextStyle(fontSize: 12)),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            Text(h.apoya, style: const TextStyle(fontSize: 13)),
+            const SizedBox(height: 6),
+            const Text('Qué comprobar:',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            for (final c in h.comprobar)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text('• $c', style: const TextStyle(fontSize: 13)),
+              ),
+          ],
+        ),
+      );
+
+  void _detalleZona(dynamic f) {
+    final centro = _centro(f);
+    final dBorde = _distBordeM(centro);
+    final nivel = (f['properties']['level'] as num) == 2 ? 'inspeccionar' : 'vigilar';
+    final previas = _insp[_claveZona(f)] ?? [];
+    final coord =
+        '${centro.latitude.toStringAsFixed(5)}, ${centro.longitude.toStringAsFixed(5)}';
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) => ConstrainedBox(
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.85),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Zona para $nivel · ${f['properties']['area_ha']} ha',
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w600)),
+                Text(coord, style: const TextStyle(color: Colors.black54)),
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'Esto no es un diagnóstico. El NDVI mide el vigor de la vegetación, no la causa. Estas son hipótesis que hay que comprobar en campo.',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                const Text('Posibles causas a investigar',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                for (final h in _hipotesis(dBorde)) _tarjetaHip(h),
+                const Text('Muestreo sugerido',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                Text(
+                    '• Punto 1: centro de la zona ($coord)\n'
+                    '• Punto 2: un punto sano del mismo cultivo, a más de 30 m de cualquier zona marcada\n'
+                    'Toma los dos el mismo día y a la misma profundidad, para poder compararlos.',
+                    style: const TextStyle(fontSize: 13)),
+                if (previas.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  Text('Inspecciones registradas (${previas.length})',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  for (final p in previas)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                          '• ${(p['fecha'] as String).substring(0, 10)}: ${p['hallazgo']}${p['muestra'] == true ? ' · con muestra de suelo' : ''}',
+                          style: const TextStyle(fontSize: 13)),
+                    ),
+                ],
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _formulario(f);
+                    },
+                    icon: const Icon(Icons.assignment_turned_in),
+                    label: const Text('Registrar inspección'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _formulario(dynamic f) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) => FormInspeccion(
+        onGuardar: (reg) async {
+          reg['imagen'] = _res?['scene_date'];
+          final k = _claveZona(f);
+          setState(() {
+            _insp.putIfAbsent(k, () => <Map<String, dynamic>>[]).add(reg);
+          });
+          await _guardarInsp();
+          if (ctx.mounted) Navigator.pop(ctx);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Inspección guardada')));
+          }
+        },
+      ),
+    );
+  }
+
+  // ---------- Panel inferior ----------
   Widget _dato(Color c, String titulo, Object? valor) => Expanded(
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 3),
@@ -215,6 +555,11 @@ class _FincaScreenState extends State<FincaScreen> {
             ),
           ),
         ]),
+        const SizedBox(height: 6),
+        Text(_resumen(),
+            textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+        const Text('Toca una zona del mapa para ver qué comprobar.',
+            style: TextStyle(fontSize: 12, color: Colors.black54)),
         TextButton(onPressed: _nueva, child: const Text('Volver a editar la finca')),
       ]);
     }
@@ -227,76 +572,7 @@ class _FincaScreenState extends State<FincaScreen> {
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
       ),
       if (_error != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: Text(_error!, style: const TextStyle(color: Colors.red)),
-        ),
-      const SizedBox(height: 8),
-      Row(children: [
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: _puntos.isEmpty || _cargando
-                ? null
-                : () => setState(() => _puntos.removeLast()),
-            icon: const Icon(Icons.undo),
-            label: const Text('Deshacer'),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: _puntos.isEmpty || _cargando
-                ? null
-                : () => setState(() => _puntos.clear()),
-            icon: const Icon(Icons.delete_outline),
-            label: const Text('Borrar'),
-          ),
-        ),
-      ]),
-      const SizedBox(height: 8),
-      SizedBox(
-        width: double.infinity,
-        child: FilledButton.icon(
-          onPressed: _puntos.length < 3 || _cargando ? null : _analizar,
-          icon: const Icon(Icons.eco),
-          label: const Text('Analizar NDVI'),
-        ),
-      ),
-    ]);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final conResultado = _res != null;
-    return Scaffold(
-      appBar: AppBar(title: const Text('AgroSenser360')),
-      body: Column(
-        children: [
-          Expanded(
-            child: Stack(
-              children: [
-                FlutterMap(
-                  mapController: _mapa,
-                  options: MapOptions(
-                    initialCenter: const LatLng(19.2314, -70.2210),
-                    initialZoom: 16,
-                    maxZoom: 19,
-                    onTap: (_, p) {
-                      if (!conResultado && !_cargando) {
-                        setState(() => _puntos.add(p));
-                      }
-                    },
-                  ),
-                  children: [
-                    TileLayer(
-                      urlTemplate:
-                          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                      userAgentPackageName: 'com.agrosenser.agrosenser360',
-                      maxNativeZoom: 19,
-                    ),
-                    if (conResultado && _verNdvi && _overlay != null)
-                      OverlayImageLayer(overlayImages: [_overlay!]),
-                    if (_puntos.length >= 3)
+        Padd             if (_puntos.length >= 3)
                       PolygonLayer(polygons: [
                         Polygon(
                           points: List.of(_puntos),
